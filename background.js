@@ -16,6 +16,8 @@ const STORAGE_KEYS = {
   UPDATE_CACHE: 'updateCheckCache'
 };
 
+const LEGACY_PAGINATION_SELECTOR_V1 = 'button[aria-label*="next" i], a[aria-label*="next" i], [class*="pagination"] button';
+
 const DEFAULT_SETTINGS = {
   silentMode: false,
   autoTrimLeading: true,
@@ -27,7 +29,7 @@ const DEFAULT_SETTINGS = {
     rowSelector: '[data-testid*="sample"], [role="row"], tr',
     itemNameSelector: '[data-testid*="filename"], .filename, a, span',
     playButtonSelector: 'button[aria-label*="Play" i], button[aria-label*="Pause" i], button',
-    paginationSelector: 'button[aria-label*="next" i], a[aria-label*="next" i], [class*="pagination"] button'
+    paginationSelector: 'a[href*="page="], [class*="pagination"] a, [class*="pagination"] button, nav[aria-label*="pagination" i] a, nav[aria-label*="pagination" i] button, button[aria-label*="next page" i], a[aria-label*="next page" i]'
   }
 };
 
@@ -55,6 +57,8 @@ let initialized = false;
 let creatingOffscreenPromise = null;
 let pendingCloseOffscreenAfterDownloads = false;
 let closeOffscreenFallbackTimer = null;
+let awaitingPageNavigation = false;
+let resumingNavigationInFlight = false;
 
 // downloadId -> blobUrl
 const pendingDownloads = new Map();
@@ -68,6 +72,11 @@ async function ensureInitialized() {
 
   if (stored[STORAGE_KEYS.SETTINGS]) {
     recorderSettings = mergeSettings(DEFAULT_SETTINGS, stored[STORAGE_KEYS.SETTINGS]);
+    // Auto-migrate exact v1.0.0 default paginationSelector to include numbered <a> links & exclude carousels
+    if (recorderSettings.selectors.paginationSelector === LEGACY_PAGINATION_SELECTOR_V1) {
+      recorderSettings.selectors.paginationSelector = DEFAULT_SETTINGS.selectors.paginationSelector;
+      await persistSettings();
+    }
   }
   if (stored[STORAGE_KEYS.STATE]) {
     sessionState = { ...structuredClone(DEFAULT_STATE), ...stored[STORAGE_KEYS.STATE] };
@@ -453,6 +462,7 @@ async function handleSkipCurrent() {
 }
 
 async function handleStopBatch(reason = 'Stopped by user') {
+  awaitingPageNavigation = false;
   const targetTabId = sessionState.tabId;
 
   if (targetTabId) {
@@ -790,6 +800,62 @@ chrome.downloads.onChanged.addListener(async (delta) => {
   }
 });
 
+// Tab Navigation Auto-Continuation (for full-page pagination links like <a href="?page=5">)
+chrome.tabs.onUpdated.addListener(async (tabId, changeInfo, tab) => {
+  if (changeInfo.status !== 'complete') return;
+  await ensureInitialized();
+
+  if (sessionState.status !== 'running' || sessionState.tabId !== tabId) return;
+  if (!tab?.url || !isCapturableUrl(tab.url)) return;
+
+  const sameCollection = normalizeUrlKey(tab.url) === normalizeUrlKey(sessionState.tabUrl);
+  if (!sameCollection && !awaitingPageNavigation) return;
+  if (resumingNavigationInFlight) return;
+
+  resumingNavigationInFlight = true;
+  try {
+    // Allow brief SPA hydration time after document load
+    await new Promise((resolve) => setTimeout(resolve, 500));
+
+    if (sessionState.status !== 'running' || sessionState.tabId !== tabId) return;
+
+    // If content.js is already alive and running (SPA soft-navigation), do not restart it
+    try {
+      const ping = await chrome.tabs.sendMessage(tabId, { type: 'PING_CONTENT' });
+      if (ping && ping.ok && ping.state === 'running') {
+        awaitingPageNavigation = false;
+        sessionState.tabUrl = tab.url;
+        await persistState();
+        return;
+      }
+    } catch (_) {
+      // Full page reload unloaded previous content script; proceed to re-inject
+    }
+
+    awaitingPageNavigation = false;
+    sessionState.tabUrl = tab.url;
+    await ensureContentScript(tabId);
+
+    const contRes = await chrome.tabs.sendMessage(tabId, {
+      type: 'SEQUENCER_START',
+      settings: recorderSettings,
+      isContinuation: true,
+      priorProcessedCount: sessionState.processedCount,
+      priorTotalCount: sessionState.totalCount
+    });
+
+    if (contRes && contRes.ok) {
+      appendLog({ type: 'info', detail: 'Continued batch automatically on next page' });
+      await persistState();
+    }
+  } catch (err) {
+    appendLog({ type: 'warn', detail: `Auto-continue check after navigation: ${err?.message || err}` });
+    await persistState();
+  } finally {
+    resumingNavigationInFlight = false;
+  }
+});
+
 // Tab Removal Safety Net
 chrome.tabs.onRemoved.addListener(async (tabId) => {
   await ensureInitialized();
@@ -893,6 +959,11 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
 
         case 'DISCARD_RECORDING':
           sendResponse(await handleDiscardRecording(message));
+          break;
+
+        case 'SEQUENCER_NAVIGATING_PAGE':
+          awaitingPageNavigation = true;
+          sendResponse({ ok: true });
           break;
 
         case 'SEQUENCER_PROGRESS':

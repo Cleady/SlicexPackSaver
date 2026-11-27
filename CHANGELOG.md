@@ -2,6 +2,14 @@
 
 All notable changes to **SlicexPackSaver (Tab Audio Batch Recorder)** are documented here.
 
+## [1.1.0] - 2026-11-27
+
+### Improved
+- Upgraded numbered pagination detection to natively support anchor link pagination bars (`<a href="...?page=N">1 2 3 [4] 5 6</a>`), non-clickable active page indicators (`<span>4</span>`), and URL `?page=N` detection.
+- Excluded unrelated horizontal carousels/sliders (e.g., "You Might Also Like" arrows) so pagination never clicks carousel controls instead of the next page.
+- Added seamless cross-page auto-continuation via `chrome.tabs.onUpdated` so multi-page batches continue automatically through the final page even when pagination links trigger full-page reloads.
+- Auto-migrated the v1.0.0 default `paginationSelector` in `chrome.storage.local` to the upgraded default.
+
 ## [1.0.0] - 2026-11-27
 
 ### Added

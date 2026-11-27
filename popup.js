@@ -11,7 +11,7 @@ const DEFAULT_SELECTORS = {
   rowSelector: '[data-testid*="sample"], [role="row"], tr',
   itemNameSelector: '[data-testid*="filename"], .filename, a, span',
   playButtonSelector: 'button[aria-label*="Play" i], button[aria-label*="Pause" i], button',
-  paginationSelector: 'button[aria-label*="next" i], a[aria-label*="next" i], [class*="pagination"] button'
+  paginationSelector: 'a[href*="page="], [class*="pagination"] a, [class*="pagination"] button, nav[aria-label*="pagination" i] a, nav[aria-label*="pagination" i] button, button[aria-label*="next page" i], a[aria-label*="next page" i]'
 };
 
 // DOM References

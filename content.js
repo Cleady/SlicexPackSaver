@@ -21,7 +21,7 @@
   const LOAD_MORE_RE = /^(load\s*more|show\s*more|view\s*more|more\s*results|more\s*items)$/i;
   const TIMESTAMP_ONLY_RE = /^\d{1,2}:\d{2}(:\d{2})?$/;
   const PAGINATION_POLL_INTERVAL_MS = 200;
-  const PAGINATION_WAIT_TIMEOUT_MS = 5000;
+  const PAGINATION_WAIT_TIMEOUT_MS = 8000;
 
   const DEFAULT_SETTINGS = {
     skipExistingFiles: true,
@@ -32,7 +32,7 @@
       rowSelector: '[data-testid*="sample"], [role="row"], tr',
       itemNameSelector: '[data-testid*="filename"], .filename, a, span',
       playButtonSelector: 'button[aria-label*="Play" i], button[aria-label*="Pause" i], button',
-      paginationSelector: 'button[aria-label*="next" i], a[aria-label*="next" i], [class*="pagination"] button'
+      paginationSelector: 'a[href*="page="], [class*="pagination"] a, [class*="pagination"] button, nav[aria-label*="pagination" i] a, nav[aria-label*="pagination" i] button, button[aria-label*="next page" i], a[aria-label*="next page" i]'
     }
   };
 
@@ -291,7 +291,22 @@
     return false;
   }
 
+  function isInsideCarousel(el) {
+    let curr = el;
+    for (let depth = 0; curr && depth < 7; depth++, curr = curr.parentElement) {
+      const meta = `${curr.className || ''} ${curr.id || ''} ${curr.getAttribute?.('data-testid') || ''} ${curr.getAttribute?.('aria-label') || ''}`;
+      if (/\b(carousel|slider|swiper|slick|horizontal-scroll|you-might-also-like)\b/i.test(meta)) {
+        return true;
+      }
+      if (/\b(next|prev(ious)?)\s+slide\b/i.test(meta)) {
+        return true;
+      }
+    }
+    return false;
+  }
+
   function isExplicitNextControl(el) {
+    if (isInsideCarousel(el)) return false;
     const aria = (el.getAttribute('aria-label') || '').trim();
     const title = (el.getAttribute('title') || '').trim();
     const rel = (el.getAttribute('rel') || '').trim().toLowerCase();
@@ -330,13 +345,41 @@
     return false;
   }
 
+  function getUrlPageNumber() {
+    const params = new URLSearchParams(window.location.search);
+    const raw = params.get('page') || params.get('p') || '';
+    const parsed = Number.parseInt(raw, 10);
+    return Number.isFinite(parsed) && parsed > 0 ? parsed : null;
+  }
+
+  function findPaginationContainer(el) {
+    if (!el) return null;
+    const explicitContainer = el.closest('[class*="pagination"], [role="navigation"], nav');
+    if (explicitContainer) return explicitContainer;
+    // Also detect compact parent list/div grouping numbered page links (e.g. <div><a>1</a><a>2</a>...</div>)
+    let parent = el.parentElement;
+    for (let depth = 0; parent && depth < 3; depth++, parent = parent.parentElement) {
+      const links = parent.querySelectorAll('a, button, [role="button"]');
+      let numericCount = 0;
+      for (const link of links) {
+        if (/^\d+$/.test((link.textContent || '').trim())) numericCount++;
+      }
+      if (numericCount >= 2 && links.length <= 25) {
+        return parent;
+      }
+    }
+    return null;
+  }
+
   /**
-   * Detects the next pagination button to click:
-   * 1. First checks for a visible, enabled explicit "Next" button matching paginationSelector.
-   * 2. Otherwise detects the active numbered page button inside the pagination container
-   *    and targets the next sequential numbered button (e.g. 1 -> 2 -> 3 -> 4).
-   * 3. Returns 'end_of_pages' when pagination exists but no enabled next page remains,
-   *    or 'none' when no pagination controls are present on the page.
+   * Detects the next pagination target to click:
+   * 1. Collects numbered page links/buttons (e.g., 1 2 3 [4] 5 6, both <a> and <button>)
+   *    and detects the current page via DOM active markers, non-link current page spans,
+   *    or URL ?page=N query params, then targets currentPage + 1.
+   * 2. Supports explicit "Next" buttons (inside the pagination container when ellipsis hides
+   *    currentPage + 1, or standalone Previous/Next bars), while excluding unrelated carousels.
+   * 3. Returns 'end_of_pages' when on the last page or Next is disabled, or 'none' when no
+   *    pagination bar exists (falling back to infinite scroll / Load More).
    */
   function findPaginationAction(selectors) {
     const selector = (selectors.paginationSelector || '').trim();
@@ -344,37 +387,29 @@
       return { status: 'none' };
     }
 
-    const matched = safeQueryAll(document, selector, 'Next Page / Pagination').filter(isElementVisible);
+    const matched = safeQueryAll(document, selector, 'Next Page / Pagination')
+      .filter((el) => isElementVisible(el) && !isInsideCarousel(el));
+
     if (matched.length === 0) {
       return { status: 'none' };
     }
 
-    // 1. Check explicit "Next" controls first
-    const explicitNextControls = matched.filter(isExplicitNextControl);
-    const enabledNext = explicitNextControls.find((el) => !isControlDisabled(el));
-    if (enabledNext) {
-      const label = (enabledNext.getAttribute('aria-label') || enabledNext.textContent || 'Next').trim();
-      return {
-        status: 'found',
-        element: enabledNext,
-        mode: 'next_button',
-        label
-      };
-    }
-
-    const hasDisabledExplicitNext = explicitNextControls.length > 0;
-
-    // 2. Collect numbered page buttons from matched elements and their pagination container(s)
+    // Collect pagination containers & all candidate controls inside them
+    const containers = new Set();
     const candidateSet = new Set(matched);
     for (const el of matched) {
-      const container = el.closest('[class*="pagination"], [role="navigation"], nav');
+      const container = findPaginationContainer(el);
       if (container) {
-        container.querySelectorAll('button, a, [role="button"]').forEach((child) => {
-          if (isElementVisible(child)) candidateSet.add(child);
+        containers.add(container);
+        container.querySelectorAll('a, button, [role="button"]').forEach((child) => {
+          if (isElementVisible(child) && !isInsideCarousel(child)) {
+            candidateSet.add(child);
+          }
         });
       }
     }
 
+    // 1. Collect clickable numbered page buttons/links (e.g., 1, 2, 3, 4, 5, 6)
     const numberedByPage = new Map();
     for (const el of candidateSet) {
       const text = (el.textContent || '').replace(/\s+/g, ' ').trim();
@@ -388,37 +423,97 @@
 
     if (numberedByPage.size > 0) {
       const numberedEntries = Array.from(numberedByPage.values()).sort((a, b) => a.pageNum - b.pageNum);
-      let activeEntry = numberedEntries.find((entry) => isActivePageControl(entry.el));
+      let currentPage = null;
 
-      // Fallback to URL ?page=N query param if DOM lacks active/current markers
-      if (!activeEntry) {
-        const params = new URLSearchParams(window.location.search);
-        const urlPage = Number.parseInt(params.get('page') || params.get('p') || '', 10);
-        if (Number.isFinite(urlPage) && numberedByPage.has(urlPage)) {
-          activeEntry = numberedByPage.get(urlPage);
+      // 1a. Check URL ?page=N first if consistent with pagination bar
+      const urlPage = getUrlPageNumber();
+
+      // 1b. Check DOM active markers on clickable numbered controls
+      const activeClickable = numberedEntries.find((entry) => isActivePageControl(entry.el));
+      if (activeClickable) {
+        currentPage = activeClickable.pageNum;
+      }
+
+      // 1c. Check non-clickable current page indicator inside pagination container (e.g., <span>4</span>)
+      if (currentPage === null) {
+        for (const container of containers) {
+          const nodes = container.querySelectorAll('span, div, li, p, strong, b, button, a');
+          for (const node of nodes) {
+            if (!isElementVisible(node)) continue;
+            const text = (node.textContent || '').replace(/\s+/g, ' ').trim();
+            if (!/^\d+$/.test(text)) continue;
+            const num = Number.parseInt(text, 10);
+            if (!Number.isFinite(num) || num <= 0) continue;
+            if (isActivePageControl(node) || (!numberedByPage.has(num) && node.children.length === 0)) {
+              currentPage = num;
+              break;
+            }
+          }
+          if (currentPage !== null) break;
         }
       }
 
-      if (activeEntry) {
-        const nextEntry = numberedByPage.get(activeEntry.pageNum + 1);
+      // 1d. Fallback to URL ?page=N (e.g. ?page=4 when 4 is plain text without active class)
+      if (currentPage === null && urlPage !== null) {
+        currentPage = urlPage;
+      }
+
+      // 1e. Fallback when on page 1 without ?page=1 in URL (e.g. page 1 is plain text and page 2 is a link)
+      if (currentPage === null && urlPage === null && numberedByPage.has(2)) {
+        currentPage = 1;
+      }
+
+      if (currentPage !== null) {
+        const nextEntry = numberedByPage.get(currentPage + 1);
         if (nextEntry && !isControlDisabled(nextEntry.el)) {
           return {
             status: 'found',
             element: nextEntry.el,
             mode: 'numbered',
-            currentPage: activeEntry.pageNum,
+            currentPage,
             targetPage: nextEntry.pageNum,
             label: `Page ${nextEntry.pageNum}`
           };
         }
+
+        // If currentPage + 1 is hidden behind an ellipsis (e.g. 1 2 3 ... 10 >), check Next button in same container
+        for (const container of containers) {
+          const nextInContainer = Array.from(container.querySelectorAll('a, button, [role="button"]'))
+            .filter((el) => isElementVisible(el) && isExplicitNextControl(el) && !isControlDisabled(el));
+          if (nextInContainer.length > 0) {
+            const btn = nextInContainer[0];
+            return {
+              status: 'found',
+              element: btn,
+              mode: 'next_button',
+              currentPage,
+              targetPage: currentPage + 1,
+              label: (btn.getAttribute('aria-label') || btn.textContent || 'Next').trim()
+            };
+          }
+        }
+
         return {
           status: 'end_of_pages',
-          currentPage: activeEntry.pageNum
+          currentPage
         };
       }
     }
 
-    if (hasDisabledExplicitNext) {
+    // 2. Standalone explicit "Next" pagination button (e.g. Previous / Next bar without numbers)
+    const explicitNextControls = Array.from(candidateSet).filter(isExplicitNextControl);
+    const enabledNext = explicitNextControls.find((el) => !isControlDisabled(el));
+    if (enabledNext) {
+      const label = (enabledNext.getAttribute('aria-label') || enabledNext.textContent || 'Next').trim();
+      return {
+        status: 'found',
+        element: enabledNext,
+        mode: 'next_button',
+        label
+      };
+    }
+
+    if (explicitNextControls.length > 0) {
       return { status: 'end_of_pages' };
     }
 
@@ -426,8 +521,8 @@
   }
 
   /**
-   * Clicks the next page button, polls up to 5 seconds until the first row's filename
-   * changes (confirming SPA render), and scrolls back to the top of the list.
+   * Clicks the next page link/button, notifies background.js in case of full-page reload,
+   * polls up to 8 seconds for SPA page render, and scrolls back to the top of the list.
    */
   async function advanceToNextPage(paginationAction, prevFirstFileName, scrollContainer) {
     paginationAction.element.scrollIntoView({ behavior: 'smooth', block: 'center' });
@@ -438,6 +533,16 @@
     if (state === 'paused') {
       return { advanced: false, aborted: 'pause' };
     }
+
+    const prevUrl = window.location.href;
+    const targetHref = paginationAction.element.tagName === 'A' ? (paginationAction.element.href || '') : '';
+
+    // Inform background.js before clicking so full-page navigation auto-resumes seamlessly
+    await sendToBackground({
+      type: 'SEQUENCER_NAVIGATING_PAGE',
+      targetHref,
+      targetPage: paginationAction.targetPage || null
+    }).catch(() => {});
 
     paginationAction.element.click();
 
@@ -454,15 +559,18 @@
       const { items: newItems } = findPlayableRows(settings.selectors);
       if (newItems.length > 0) {
         const newFirstFileName = newItems[0].fileName;
-        if (newFirstFileName !== prevFirstFileName) {
-          // Next page rendered — scroll back to the top of the list before continuing
+        const urlChanged = window.location.href !== prevUrl;
+        const hasUnvisited = newItems.some((item) => !visitedThisRun.has(item.key));
+
+        if (newFirstFileName !== prevFirstFileName || (urlChanged && hasUnvisited)) {
+          // Next page rendered in SPA — scroll back to the top of the list before continuing
           if (scrollContainer && scrollContainer !== window && scrollContainer.isConnected) {
             scrollContainer.scrollTo({ top: 0, behavior: 'smooth' });
           }
           window.scrollTo({ top: 0, behavior: 'smooth' });
           newItems[0].row.scrollIntoView({ behavior: 'smooth', block: 'center' });
 
-          const settleRes = await interruptibleSleep(300);
+          const settleRes = await interruptibleSleep(350);
           if (settleRes === 'stop' || state === 'stopping' || state === 'idle') {
             return { advanced: false, aborted: 'stop' };
           }
@@ -712,15 +820,41 @@
 
   /**
    * Main async sequencer loop.
+   * Supports seamless continuation across full-page pagination reloads.
    */
-  async function runSequencerLoop() {
+  async function runSequencerLoop({ isContinuation = false, priorProcessedCount = 0, priorTotalCount = 0 } = {}) {
     let lastSeenRow = null;
     let scrollRetries = 0;
     const MAX_SCROLL_RETRIES = 5;
     const SCROLL_RETRY_INTERVAL_MS = 800;
+    const processedOffset = isContinuation ? Math.max(0, Number(priorProcessedCount) || 0) : 0;
+    const totalOffset = isContinuation ? Math.max(0, Number(priorTotalCount) || 0) : 0;
+
+    const getProcessedCount = () => processedOffset + visitedThisRun.size;
+    const getTotalCount = () => Math.max(totalOffset + knownItems.size, getProcessedCount());
 
     try {
       await loadProcessedSet();
+
+      // When resuming after a full-page navigation, wait up to 6s for rows to hydrate
+      if (isContinuation) {
+        const hydrateDeadline = Date.now() + 6000;
+        while (Date.now() < hydrateDeadline && (state === 'running' || state === 'paused')) {
+          if (state === 'paused') {
+            await waitWhilePaused();
+            if (state !== 'running') break;
+          }
+          const initial = findPlayableRows(settings.selectors);
+          if (initial.items.length > 0) break;
+          const res = await interruptibleSleep(250);
+          if (res === 'stop' || state === 'stopping' || state === 'idle') {
+            cleanupAllResources();
+            state = 'idle';
+            return;
+          }
+        }
+      }
+
       const folderName = extractCollectionTitle(settings.selectors);
 
       while (state === 'running' || state === 'paused') {
@@ -740,8 +874,8 @@
           await sendToBackground({
             type: 'SEQUENCER_PROGRESS',
             folderName,
-            processedCount: visitedThisRun.size,
-            totalCount: knownItems.size,
+            processedCount: getProcessedCount(),
+            totalCount: getTotalCount(),
             currentFile: ''
           });
 
@@ -779,7 +913,7 @@
               continue;
             }
 
-            // Polling timed out after 5s without first row changing -> complete cleanly
+            // Polling timed out after 8s without first row changing -> complete cleanly
             clearAllHighlights();
             state = 'idle';
             await sendToBackground({
@@ -790,8 +924,8 @@
             await sendToBackground({
               type: 'SEQUENCER_COMPLETE',
               folderName,
-              processedCount: visitedThisRun.size,
-              totalCount: knownItems.size
+              processedCount: getProcessedCount(),
+              totalCount: getTotalCount()
             });
             return;
           }
@@ -809,8 +943,8 @@
             await sendToBackground({
               type: 'SEQUENCER_COMPLETE',
               folderName,
-              processedCount: visitedThisRun.size,
-              totalCount: knownItems.size
+              processedCount: getProcessedCount(),
+              totalCount: getTotalCount()
             });
             return;
           }
@@ -822,8 +956,8 @@
             await sendToBackground({
               type: 'SEQUENCER_COMPLETE',
               folderName,
-              processedCount: visitedThisRun.size,
-              totalCount: knownItems.size
+              processedCount: getProcessedCount(),
+              totalCount: getTotalCount()
             });
             return;
           }
@@ -892,8 +1026,8 @@
             await sendToBackground({
               type: 'SEQUENCER_PROGRESS',
               folderName,
-              processedCount: visitedThisRun.size,
-              totalCount: knownItems.size,
+              processedCount: getProcessedCount(),
+              totalCount: getTotalCount(),
               currentFile: '',
               incrementSkipped: true
             });
@@ -904,8 +1038,8 @@
         await sendToBackground({
           type: 'SEQUENCER_PROGRESS',
           folderName,
-          processedCount: visitedThisRun.size,
-          totalCount: knownItems.size,
+          processedCount: getProcessedCount(),
+          totalCount: getTotalCount(),
           currentFile: nextItem.fileName
         });
 
@@ -928,8 +1062,8 @@
           type: 'START_RECORDING',
           folderName,
           fileName: nextItem.fileName,
-          processedCount: visitedThisRun.size,
-          totalCount: knownItems.size
+          processedCount: getProcessedCount(),
+          totalCount: getTotalCount()
         });
 
         if (!startRes || !startRes.ok || startRes.type !== 'RECORDING_READY') {
@@ -960,8 +1094,8 @@
             type: 'DISCARD_RECORDING',
             reason: 'stop',
             fileName: nextItem.fileName,
-            processedCount: visitedThisRun.size,
-            totalCount: knownItems.size
+            processedCount: getProcessedCount(),
+            totalCount: getTotalCount()
           });
           removeRowHighlight(nextItem.row);
           break;
@@ -973,8 +1107,8 @@
             type: 'DISCARD_RECORDING',
             reason: 'pause',
             fileName: nextItem.fileName,
-            processedCount: visitedThisRun.size,
-            totalCount: knownItems.size
+            processedCount: getProcessedCount(),
+            totalCount: getTotalCount()
           });
           removeRowHighlight(nextItem.row);
           // Do NOT mark visited/processed so Resume cleanly records this item from the start
@@ -990,8 +1124,8 @@
             type: 'DISCARD_RECORDING',
             reason: 'skip',
             fileName: nextItem.fileName,
-            processedCount: visitedThisRun.size,
-            totalCount: knownItems.size
+            processedCount: getProcessedCount(),
+            totalCount: getTotalCount()
           });
           removeRowHighlight(nextItem.row);
           await interruptibleSleep(250);
@@ -1025,8 +1159,8 @@
           recordingId: completedRecordingId,
           folderName,
           fileName: nextItem.fileName,
-          processedCount: visitedThisRun.size,
-          totalCount: knownItems.size
+          processedCount: getProcessedCount(),
+          totalCount: getTotalCount()
         });
 
         if (!saveRes || !saveRes.ok || saveRes.type !== 'SAVED_OK') {
@@ -1166,11 +1300,13 @@
             };
           }
 
+          const isContinuation = Boolean(message.isContinuation);
+
           // Validate selectors upfront before starting async loop
           extractCollectionTitle(settings.selectors);
           findPaginationAction(settings.selectors);
           const preview = findPlayableRows(settings.selectors);
-          if (preview.items.length === 0) {
+          if (!isContinuation && preview.items.length === 0) {
             sendResponse({
               ok: false,
               error: 'No playable rows matched the configured selectors on this page. Use "Test Selectors" to verify.'
@@ -1179,7 +1315,11 @@
           }
 
           state = 'running';
-          runSequencerLoop();
+          runSequencerLoop({
+            isContinuation,
+            priorProcessedCount: message.priorProcessedCount || 0,
+            priorTotalCount: message.priorTotalCount || 0
+          });
           sendResponse({ ok: true, initialCount: preview.items.length });
           return false;
         }
