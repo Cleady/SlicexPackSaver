@@ -1,0 +1,34 @@
+{
+  "manifest_version": 3,
+  "name": "Tab Audio Batch Recorder",
+  "version": "1.0.0",
+  "description": "Record clean 16-bit Stereo PCM WAV audio from the active browser tab using AudioWorkletNode with automatic silence trimming and configurable DOM batch sequencing.",
+  "permissions": [
+    "tabCapture",
+    "activeTab",
+    "offscreen",
+    "downloads",
+    "storage",
+    "scripting"
+  ],
+  "host_permissions": [
+    "<all_urls>"
+  ],
+  "background": {
+    "service_worker": "background.js"
+  },
+  "action": {
+    "default_popup": "popup.html",
+    "default_title": "Tab Audio Batch Recorder"
+  },
+  "web_accessible_resources": [
+    {
+      "resources": [
+        "pcm-processor.js"
+      ],
+      "matches": [
+        "<all_urls>"
+      ]
+    }
+  ]
+}

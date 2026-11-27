@@ -1,0 +1,185 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>Tab Audio Batch Recorder</title>
+  <link rel="stylesheet" href="popup.css" />
+</head>
+<body>
+  <div class="app-shell">
+    <!-- Header -->
+    <header class="header">
+      <div class="brand">
+        <div class="brand-icon" aria-hidden="true">
+          <svg width="18" height="18" viewBox="0 0 24 24" fill="none">
+            <rect x="2" y="9" width="2.5" height="6" rx="1.25" fill="#22d3ee" />
+            <rect x="6.5" y="5" width="2.5" height="14" rx="1.25" fill="#22d3ee" />
+            <rect x="11" y="2.5" width="2.5" height="19" rx="1.25" fill="#10b981" />
+            <rect x="15.5" y="6.5" width="2.5" height="11" rx="1.25" fill="#22d3ee" />
+            <rect x="20" y="9.5" width="2.5" height="5" rx="1.25" fill="#10b981" />
+          </svg>
+        </div>
+        <div class="brand-text">
+          <h1>Tab Audio Batch Recorder</h1>
+          <span class="subtitle">16-bit Stereo PCM &bull; AudioWorklet DSP</span>
+        </div>
+      </div>
+      <div id="statusBadge" class="status-badge status-idle">
+        <span class="status-dot"></span>
+        <span id="statusText">IDLE</span>
+      </div>
+    </header>
+
+    <!-- Error Banner (hidden unless error) -->
+    <div id="errorBanner" class="error-banner hidden" role="alert">
+      <span id="errorMessage"></span>
+    </div>
+
+    <!-- Status Card -->
+    <section class="card status-card" aria-label="Recording Status">
+      <div class="meta-row">
+        <span class="meta-label">SESSION FOLDER</span>
+        <span id="folderName" class="meta-value mono" title="">—</span>
+      </div>
+      <div class="meta-row">
+        <span class="meta-label">NOW RECORDING</span>
+        <span id="currentFile" class="meta-value mono accent-cyan" title="">Idle</span>
+      </div>
+
+      <div class="progress-block">
+        <div class="progress-header">
+          <span class="meta-label">BATCH PROGRESS</span>
+          <span id="progressText" class="progress-count mono">0 / 0</span>
+        </div>
+        <div class="progress-track" role="progressbar" aria-valuemin="0" aria-valuemax="100" aria-valuenow="0">
+          <div id="progressFill" class="progress-fill" style="width: 0%;"></div>
+        </div>
+      </div>
+    </section>
+
+    <!-- Transport Controls -->
+    <section class="controls-section" aria-label="Transport Controls">
+      <div class="controls-primary">
+        <button id="btnStart" class="btn btn-primary" type="button">
+          <span class="rec-dot"></span>
+          Start Batch
+        </button>
+        <button id="btnPauseResume" class="btn btn-secondary" type="button" disabled>
+          Pause
+        </button>
+      </div>
+      <div class="controls-secondary">
+        <button id="btnSkip" class="btn btn-ghost" type="button" disabled>
+          Skip
+        </button>
+        <button id="btnStop" class="btn btn-danger" type="button" disabled>
+          Stop
+        </button>
+        <button id="btnClearCache" class="btn btn-ghost" type="button" title="Clear processed item history for the current page URL">
+          Clear Cache
+        </button>
+      </div>
+    </section>
+
+    <!-- Recording Settings -->
+    <section class="card settings-card" aria-label="Recording Settings">
+      <div class="section-title">RECORDING &amp; DSP SETTINGS</div>
+
+      <label class="toggle-row" for="toggleSilentMode">
+        <div class="toggle-info">
+          <span class="toggle-label">Silent Mode</span>
+          <span class="toggle-hint">Mute tab monitor passthrough (gain = 0)</span>
+        </div>
+        <div class="switch">
+          <input id="toggleSilentMode" type="checkbox" />
+          <span class="slider"></span>
+        </div>
+      </label>
+
+      <label class="toggle-row" for="toggleAutoTrim">
+        <div class="toggle-info">
+          <span class="toggle-label">Auto-Trim Leading Silence</span>
+          <span class="toggle-hint">Detect &gt; -60 dBFS with 5ms transient pre-roll</span>
+        </div>
+        <div class="switch">
+          <input id="toggleAutoTrim" type="checkbox" checked />
+          <span class="slider"></span>
+        </div>
+      </label>
+
+      <label class="toggle-row" for="toggleSkipExisting">
+        <div class="toggle-info">
+          <span class="toggle-label">Skip Existing Files</span>
+          <span class="toggle-hint">Skip items already cached or saved on disk</span>
+        </div>
+        <div class="switch">
+          <input id="toggleSkipExisting" type="checkbox" checked />
+          <span class="slider"></span>
+        </div>
+      </label>
+
+      <div class="timing-grid">
+        <div class="field">
+          <label for="inputTailBuffer">Tail Buffer (ms)</label>
+          <input id="inputTailBuffer" class="input mono" type="number" min="0" max="5000" step="10" value="150" />
+        </div>
+        <div class="field">
+          <label for="inputIntervalDelay">Interval Delay (ms)</label>
+          <input id="inputIntervalDelay" class="input mono" type="number" min="50" max="10000" step="50" value="500" />
+        </div>
+      </div>
+    </section>
+
+    <!-- Collapsible Target Selectors Panel -->
+    <details id="selectorsPanel" class="card collapsible-card">
+      <summary class="collapsible-summary">
+        <span class="section-title">TARGET SELECTORS</span>
+        <span class="chevron" aria-hidden="true"></span>
+      </summary>
+      <div class="collapsible-body">
+        <div class="field">
+          <label for="selCollectionTitle">Collection Title Selector</label>
+          <input id="selCollectionTitle" class="input mono" type="text" placeholder="h1" />
+        </div>
+        <div class="field">
+          <label for="selRow">Row Selector</label>
+          <input id="selRow" class="input mono" type="text" placeholder='[data-testid*="sample"], [role="row"], tr' />
+        </div>
+        <div class="field">
+          <label for="selItemName">Item Name Selector</label>
+          <input id="selItemName" class="input mono" type="text" placeholder='[data-testid*="filename"], .filename, a, span' />
+        </div>
+        <div class="field">
+          <label for="selPlayButton">Play Button Selector</label>
+          <input id="selPlayButton" class="input mono" type="text" placeholder='button[aria-label*="Play" i], button[aria-label*="Pause" i], button' />
+        </div>
+        <div class="field">
+          <label for="selPagination">Next Page / Pagination Selector</label>
+          <input id="selPagination" class="input mono" type="text" placeholder='button[aria-label*="next" i], a[aria-label*="next" i], [class*="pagination"] button' />
+        </div>
+
+        <div class="selector-actions">
+          <button id="btnTestSelectors" class="btn btn-cyan" type="button">Test Selectors</button>
+          <button id="btnResetSelectors" class="btn btn-ghost btn-compact" type="button">Reset Defaults</button>
+        </div>
+
+        <div id="selectorTestResult" class="test-result hidden"></div>
+      </div>
+    </details>
+
+    <!-- Activity Log -->
+    <section class="card log-card" aria-label="Activity Log">
+      <div class="log-header">
+        <span class="section-title">ACTIVITY LOG</span>
+        <button id="btnClearLog" class="link-btn" type="button">Clear</button>
+      </div>
+      <div id="activityLog" class="log-list mono">
+        <div class="log-empty">No activity yet. Click "Test Selectors" or "Start Batch".</div>
+      </div>
+    </section>
+  </div>
+
+  <script src="popup.js"></script>
+</body>
+</html>
