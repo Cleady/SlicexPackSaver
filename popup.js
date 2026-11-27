@@ -17,6 +17,9 @@ const DEFAULT_SELECTORS = {
 // DOM References
 const elStatusBadge = document.getElementById('statusBadge');
 const elStatusText = document.getElementById('statusText');
+const elUpdateBanner = document.getElementById('updateBanner');
+const elUpdateText = document.getElementById('updateText');
+const elUpdateLink = document.getElementById('updateLink');
 const elErrorBanner = document.getElementById('errorBanner');
 const elErrorMessage = document.getElementById('errorMessage');
 const elFolderName = document.getElementById('folderName');
@@ -400,4 +403,15 @@ chrome.runtime.onMessage.addListener((message) => {
   } catch (err) {
     showInlineError(`Failed to connect to background service worker: ${err?.message || err}`);
   }
+
+  // Non-blocking GitHub Release update check (6h cached)
+  sendBg({ type: 'CHECK_UPDATE' })
+    .then((upd) => {
+      if (upd && upd.ok && upd.hasUpdate && upd.latestVersion) {
+        elUpdateText.textContent = `New release v${upd.latestVersion} available (current v${upd.currentVersion})`;
+        elUpdateLink.href = upd.releaseUrl || upd.downloadUrl || 'https://github.com/Cleady/SlicexPackSaver/releases/latest';
+        elUpdateBanner.classList.remove('hidden');
+      }
+    })
+    .catch(() => {});
 })();

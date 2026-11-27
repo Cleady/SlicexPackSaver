@@ -170,6 +170,31 @@ body {
   50% { opacity: 0.4; transform: scale(0.85); }
 }
 
+/* Update Banner */
+.update-banner {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+  background: var(--emerald-dim);
+  border: 1px solid rgba(16, 185, 129, 0.35);
+  color: #6ee7b7;
+  padding: 6px 9px;
+  border-radius: var(--radius-sm);
+  font-size: 11px;
+}
+
+.update-link {
+  color: var(--cyan);
+  font-weight: 600;
+  text-decoration: none;
+  flex-shrink: 0;
+}
+
+.update-link:hover {
+  text-decoration: underline;
+}
+
 /* Error Banner */
 .error-banner {
   background: var(--red-dim);

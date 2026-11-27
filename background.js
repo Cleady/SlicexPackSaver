@@ -7,10 +7,13 @@
 'use strict';
 
 const OFFSCREEN_DOCUMENT_PATH = 'offscreen.html';
+const GITHUB_LATEST_RELEASE_API = 'https://api.github.com/repos/Cleady/SlicexPackSaver/releases/latest';
+const UPDATE_CHECK_TTL_MS = 6 * 60 * 60 * 1000; // 6 hours
 const STORAGE_KEYS = {
   STATE: 'sessionState',
   SETTINGS: 'recorderSettings',
-  PROCESSED_BY_URL: 'processedItemsByUrl'
+  PROCESSED_BY_URL: 'processedItemsByUrl',
+  UPDATE_CACHE: 'updateCheckCache'
 };
 
 const DEFAULT_SETTINGS = {
@@ -666,6 +669,73 @@ async function handleDiscardRecording(message) {
   return { ok: true };
 }
 
+function compareSemver(a, b) {
+  const pa = String(a || '0').replace(/^v/i, '').split('.').map((n) => Number.parseInt(n, 10) || 0);
+  const pb = String(b || '0').replace(/^v/i, '').split('.').map((n) => Number.parseInt(n, 10) || 0);
+  const len = Math.max(pa.length, pb.length);
+  for (let i = 0; i < len; i++) {
+    const da = pa[i] || 0;
+    const db = pb[i] || 0;
+    if (da > db) return 1;
+    if (da < db) return -1;
+  }
+  return 0;
+}
+
+async function handleCheckUpdate({ force = false } = {}) {
+  const currentVersion = chrome.runtime.getManifest?.()?.version || '1.0.0';
+
+  if (!force) {
+    const stored = await chrome.storage.local.get(STORAGE_KEYS.UPDATE_CACHE);
+    const cached = stored[STORAGE_KEYS.UPDATE_CACHE];
+    if (cached && cached.checkedAt && (Date.now() - cached.checkedAt) < UPDATE_CHECK_TTL_MS) {
+      return {
+        ok: true,
+        currentVersion,
+        latestVersion: cached.latestVersion,
+        hasUpdate: compareSemver(cached.latestVersion, currentVersion) > 0,
+        releaseUrl: cached.releaseUrl,
+        downloadUrl: cached.downloadUrl
+      };
+    }
+  }
+
+  try {
+    const resp = await fetch(GITHUB_LATEST_RELEASE_API, {
+      headers: { Accept: 'application/vnd.github+json' }
+    });
+    if (!resp.ok) {
+      return { ok: false, currentVersion, hasUpdate: false };
+    }
+    const data = await resp.json();
+    const latestVersion = String(data.tag_name || '').replace(/^v/i, '').trim();
+    const releaseUrl = data.html_url || 'https://github.com/Cleady/SlicexPackSaver/releases/latest';
+    const zipAsset = Array.isArray(data.assets)
+      ? data.assets.find((a) => typeof a?.name === 'string' && a.name.endsWith('.zip'))
+      : null;
+    const downloadUrl = zipAsset?.browser_download_url || releaseUrl;
+
+    const payload = {
+      checkedAt: Date.now(),
+      latestVersion,
+      releaseUrl,
+      downloadUrl
+    };
+    await chrome.storage.local.set({ [STORAGE_KEYS.UPDATE_CACHE]: payload });
+
+    return {
+      ok: true,
+      currentVersion,
+      latestVersion,
+      hasUpdate: Boolean(latestVersion) && compareSemver(latestVersion, currentVersion) > 0,
+      releaseUrl,
+      downloadUrl
+    };
+  } catch (_) {
+    return { ok: false, currentVersion, hasUpdate: false };
+  }
+}
+
 async function handleCheckFileExists(message) {
   const safeFolder = sanitizeSegment(message.folderName || sessionState.folderName, 'Session');
   const safeFile = sanitizeWavFilename(message.fileName, 'audio_item');
@@ -803,6 +873,10 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
 
         case 'TEST_SELECTORS':
           sendResponse(await handleTestSelectors(message.selectors));
+          break;
+
+        case 'CHECK_UPDATE':
+          sendResponse(await handleCheckUpdate({ force: Boolean(message.force) }));
           break;
 
         case 'CHECK_FILE_EXISTS':

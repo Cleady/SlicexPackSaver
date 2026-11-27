@@ -1,0 +1,22 @@
+# OS & Finder / Explorer
+.DS_Store
+Thumbs.db
+desktop.ini
+
+# Build & Packaging artifacts
+dist/
+*.zip
+*.crx
+*.pem
+
+# Node / Temp / Logs
+node_modules/
+*.log
+.env
+.env.local
+
+# IDE / Editors
+.vscode/
+.idea/
+*.swp
+*.swo

@@ -1,0 +1,45 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+
+jobs:
+  validate:
+    name: Validate Extension Files
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+
+      - name: Check JavaScript syntax
+        run: |
+          node --check background.js
+          node --check offscreen.js
+          node --check pcm-processor.js
+          node --check content.js
+          node --check popup.js
+
+      - name: Validate manifest.json (MV3)
+        run: |
+          node -e "
+            const fs = require('fs');
+            const m = JSON.parse(fs.readFileSync('manifest.json', 'utf8'));
+            if (m.manifest_version !== 3) throw new Error('manifest_version must be 3');
+            if (!m.version || !/^\d+\.\d+\.\d+/.test(m.version)) throw new Error('Invalid version: ' + m.version);
+            const requiredFiles = [
+              'background.js', 'offscreen.html', 'offscreen.js',
+              'pcm-processor.js', 'content.js', 'popup.html', 'popup.css', 'popup.js'
+            ];
+            for (const f of requiredFiles) {
+              if (!fs.existsSync(f)) throw new Error('Missing required extension file: ' + f);
+            }
+            console.log('Validated MV3 manifest v' + m.version + ' and all extension files.');
+          "
